@@ -3,6 +3,7 @@ package goJsonReader
 import (
 	"testing"
 	"strings"
+	"github.com/tidwall/gjson"
 )
 
 func printError(t *testing.T, path []string,
@@ -11,7 +12,7 @@ func printError(t *testing.T, path []string,
 	e error,
 ) {
 	if e != nil {
-		t.Errorf("Getting path=%v from json object returned the following error %v.\n", path, e)
+		t.Errorf("Getting path=%v from json object returned the following error %v\n", path, e)
 	}
 	if returnedValue != expectedValue {
 		t.Errorf("Getting path=%v from json object returned unexpect value \"%v\".\n", path, returnedValue)
@@ -22,7 +23,7 @@ func printError(t *testing.T, path []string,
 }
 
 func TestGettingTopLevelKeyWithStringValue(t *testing.T) {
-	path := []string{"abc"}
+	path := []string{"abc\t"}
 	expectedValue := "aaaaaac"
 	expectedDataType := JsonString
 	s, d, e := Get(jsonBytes, path)
@@ -174,6 +175,31 @@ func TestForEachKeysInTopLevelObject(t *testing.T) {
 	}
 }
 
+// BENCHMARKS
+func Benchmark_Get (b *testing.B) {
+	path := strings.Split("bigObject.service.attributes.commission.array.3.1.aaa", ".")
+	for i := 0; i < b.N; i++ {
+		returnedString, returnedDatatype, returnedError = Get(jsonBytes, path)
+	}
+}
+func Benchmark_Get2 (b *testing.B) {
+	path := strings.Split("bigObject.service.attributes.commission.array.3.1.aaa", ".")
+	for i := 0; i < b.N; i++ {
+		returnedString, returnedDatatype, returnedError = Get2(jsonBytes, path)
+	}
+}
+func Benchmark_gjson (b *testing.B) {
+	path := "bigObject.service.attributes.commission.array.3.1.aaa"
+	for i := 0; i < b.N; i++ {
+		result = gjson.GetBytes(jsonBytes, path)
+	}
+}
+
+var result gjson.Result
+var returnedString string
+var returnedDatatype DataType
+var returnedError error
+
 var client = `{
 				"attributes": {
 					"full name": "string",
@@ -231,7 +257,7 @@ var jsonBytes = []byte(`{`+
 		"emptyArray": [],
 		"emptyObject": {},
 		"bcryptCost": 10,
-		"abc": "aaaaaac",
+		"abc\t": "aaaaaac",
 		"aNUllValue": null,
 		"aTrueValue": true,
 		"aFalseValue": false

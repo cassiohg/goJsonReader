@@ -6,6 +6,7 @@ import (
 	"unsafe"
 	"reflect"
 	"bytes"
+	"github.com/tidwall/gjson"
 )
 
 
@@ -35,16 +36,33 @@ func (d DataType) String() string {
 func btos(b []byte) string { return *(*string)(unsafe.Pointer(&b)) }
 func stob(s string) []byte { return (*[0x7fff0000]byte)(unsafe.Pointer((*reflect.StringHeader)(unsafe.Pointer(&s)).Data))[:len(s):len(s)] }
 
-type JSONEndsAbruptlyError struct {}
-func (e *JSONEndsAbruptlyError) Error () string { return "JSON ends abruptly." }
-type JSONBadSyntaxError struct {c byte; i int}
-func (e *JSONBadSyntaxError) Error () string { return fmt.Sprintf("Bad JSON syntax '%c' at %d.", e.c, e.i) }
+type JsonEndsAbruptlyError struct {}
+func (e *JsonEndsAbruptlyError) Error () string { return "JSON ends abruptly." }
+type JsonBadSyntaxError struct {c byte; i int}
+func (e *JsonBadSyntaxError) Error () string { return fmt.Sprintf("Bad JSON syntax '%c' at %d.", e.c, e.i) }
 
 
+func jsonUnescape(json []byte) []byte {
+	unescapedString := make([]byte, 0, len(json))
+	for i := 0; i < len(json); i++ {
+		if json[i] != '\\'{ unescapedString = append(unescapedString, json[i]); continue }
+		switch json[i+1] {
+		case 'b': unescapedString = append(unescapedString, '\b')
+		case 'f': unescapedString = append(unescapedString, '\f')
+		case 'n': unescapedString = append(unescapedString, '\n')
+		case 't': unescapedString = append(unescapedString, '\t')
+		case 'r': unescapedString = append(unescapedString, '\r')
+		case '"': unescapedString = append(unescapedString, '"')
+		case '\\': unescapedString = append(unescapedString, '\\')
+		}
+		i++
+	}
+	return unescapedString;
+}
 
-/* Receives a string to be read as json as 1st argument followed by one or more strings that compose one path to a value 
-inside the json structure. Returns the value as string, the value data type as int and may return a non nil error. There 
-may be short cuts implemented which impose constraints on how the json can be formed. The trade off is parsing speed.*/
+// Receives a string to be read as json as 1st argument followed by one or more strings that compose one path to a value 
+// inside the json structure. Returns the value as string, the value data type as int and may return a non nil error. There 
+// may be short cuts implemented which impose constraints on how the json can be formed. The trade off is parsing speed.
 func ForEach (json []byte, keys []string, each func(string, string, DataType, error) bool) error {
 	if len(keys) == 0 { return nil }
 	length := len(json)
@@ -75,22 +93,21 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 
 			/* Between 'space', 'tab', 'return' and 'new line' chars, the 'space' char has the biggest byte number and they 
 			are all bellow any other important char. */
-			for json[i] <= ' ' { i++; if i>=length{return &JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
+			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
 
 			switch json[i] { // matching char with a type of value.
 			case '{': // objects.
 				// fmt.Printf("'{'\n") // debug
+				i++
+				if i>=length{return &JsonEndsAbruptlyError{}}
+				for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tab, returns and new lines.
 				if path == 1 {
-					i++
-					for json[i] <= ' ' { i++; if i>=length{return &JSONEndsAbruptlyError{}} } // skipping spaces, tab, returns and new lines.
 					if json[i] != '}' {
 						stack = append(stack, '{') // when an object, we have another structure to traverse.
 						value = false
 						continue
 					}
 				} else if path == 2 {
-					i++
-					for json[i] <= ' ' { i++ } // skipping spaces, tab, returns and new lines.
 					// fmt.Printf("path: %d\n", path) // debug
 					if bufferEach == false {
 						bufferEach = true
@@ -101,10 +118,9 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 					} else {
 						if json[i] != '}' {
 							valueStart := i
-							nest := 0
-							for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+							for nest := 0 ; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 								switch json[i] {
-								case '"': for json[i] != '"' || json[i-1] == '\\' { i++ } // ignoring escaped quotes.
+								case '"': Str0:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str0};j--}}
 								case '{': nest++
 								case '}': nest--
 								}
@@ -119,10 +135,9 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 					}
 				} else if path == 0 {
 					// valueStart := i // debug.
-					nest := 0
-					for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 						switch json[i] {
-						case '"': for json[i] != '"' || json[i-1] == '\\' { i++ } // ignoring escaped quotes.
+						case '"': Str1:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str1};j--}}
 						case '{': nest++
 						case '}': nest--
 						}
@@ -131,9 +146,10 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 				}
 			case '[': // arrays.
 				// fmt.Printf("'['\n") // debug.
+				i++
+				if i>=length{return &JsonEndsAbruptlyError{}}
+				for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tab, returns and new lines.
 				if path == 1 {
-					i++
-					for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
 					if json[i] != ']' {
 						// inside an array there are more values, so we have to keep 'value = true'.
 						stack = append(stack, '[')
@@ -147,14 +163,12 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 						continue
 					}
 				} else if path == 2 {
-					for json[i] <= ' ' { i++ } // skipping spaces, tab, returns and new lines.
 					bufferEach = true
 					if json[i] != ']' {
 						valueStart := i
-						nest := 0
-						for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+						for nest := 0; nest > -1; i++ { // will consider only brackets out of strings (both keys and values).
 							switch json[i] {
-							case '"': for json[i] != '"' || json[i-1] == '\\' { i++ } // ignoring escaped quotes.
+							case '"': Str2:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str2};j--}}
 							case '[': nest++
 							case ']': nest--
 							}
@@ -166,10 +180,9 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 				} else {
 					// valueStart := i // debug.
 					// fmt.Printf("valueStart=%d.\n", valueStart) // debug.
-					nest := 0
-					for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 						switch json[i] {
-						case '"': for json[i] != '"' || json[i-1] == '\\' { i++ } // ignoring escaped quotes.
+						case '"': Str3:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str3};j--}}
 						case '[': nest++
 						case ']': nest--
 						}
@@ -179,8 +192,10 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 			case '"': // strings.
 				// fmt.Printf("start of a string\n") // debug.
 				i++
+				if i>=length{return &JsonEndsAbruptlyError{}}
 				k := i
-				for json[i] != '"' || json[i-1] == '\\' { i++ } // searching string end.
+				// searching end of string.
+				Str4:for{for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str4};j--};i++}
 				// fmt.Printf("start=%d, end=%d.\n", k, i) // debug.
 				if path == 1 {
 					return fmt.Errorf("JSON %v is not object can't traverse further.", keys[:keyIndex+1])
@@ -237,7 +252,7 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 			}
 			// fmt.Printf("value skipped\n") // debug.
 			// fmt.Printf("-- finished reading value.\n") // debug
-			for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
 
 			switch json[i] {
 			// if we are in a object, we'll parse a key. if we are in an array, we'll parse a value.
@@ -267,12 +282,13 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 				}
 			}
 			i++
-			for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
 		} else { // reading key
 			// fmt.Printf("-- [keyIndex: %d] reading key.\n", keyIndex) // debug
 			value = true
-			for json[i] != '"' { i++ } // skipping every char that isn't a double quote.
+			for json[i] != '"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping every char that isn't a double quote.
 			i++
+			if i>=length{return &JsonEndsAbruptlyError{}}
 
 			if bufferEach == false {
 			// if stack level matches query string index and we are still traversing the structure.
@@ -293,7 +309,6 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 				}
 				if keyMatch && json[i] == '"' { // if keys have the same chars and json key doesn't have more chars.
 					// fmt.Printf("key found %s correct found at position %d.\n", json[i-j-1:i+1], i-j-1) // debug.
-					for json[i] != ':' { i++ } // searching key-value separator.
 					if len(keys) > keyIndex+1 {
 						keyIndex++
 						key = keys[keyIndex]
@@ -306,9 +321,9 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 				} else {
 					path = 0 // deviated from correct path.
 					// k := i // debug
-					for json[i] != '"' { i++ } // searching key end.
+					// searching key end.
+					Str5:for{for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str5};j--};i++}
 					// fmt.Printf("key found %s not correct.\n", json[k-j-1:i+1]) // debug
-					for json[i] != ':' { i++ } // searching key-value separator.
 				}
 			} else {
 			// 	// k := i // debug
@@ -316,35 +331,30 @@ func ForEach (json []byte, keys []string, each func(string, string, DataType, er
 			// 	// fmt.Printf("ignoring key '%s'.\n", json[k-1:i+1]) // debug
 			// 	for json[i] != ':' { i++ } // searching key-value separator.
 				k := i
-				for json[i] != '"' || json[i-1] == '\\' { i++ }
+				Str6:for{for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str6};j--};i++}
 				lastKey = btos(json[k:i])
 				// fmt.Printf("lastKey '%s'.\n", lastKey) // debug
-				i++
-				for json[i] != ':' { i++ }
 			}
+			for json[i] != ':' { i++; if i>=length{return &JsonEndsAbruptlyError{}} }
 			i++
-			for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+			if i>=length{return &JsonEndsAbruptlyError{}}
+			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
 		}
 	}
 
 	return fmt.Errorf(`this part should not be reached when getting a field from a json`)
 }
 
-/* Receives a string to be read as json as 1st argument followed by one or more strings that compose a path to a value 
-inside the json structure. Returns the value as string, the value data type as int and may return a non nil error. There 
-may be short cuts implemented which impose constraints on how the json can be formed. The trade off is parsing speed.*/
-func Get (json []byte, keys []string) (string, DataType, error) {
-	length := len(json)
+// Receives a string to be read as json as 1st argument followed by one or more strings that compose a path to a value 
+// inside the json structure. Returns the value as string, the value data type as int and may return a non nil error. There 
+// may be short cuts implemented which impose constraints on how the json can be formed. The trade off is parsing speed.
+func getPanic (json []byte, keys []string) (string, DataType, error) {
+	// length := len(json)
 	amountOfKeys := len(keys)
-	i := 0 // index inside the string.
-
-	if amountOfKeys == 0 {
-		for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
-		return getValue(json, i)
-	}
-
+	if amountOfKeys == 0 { return getValue(json, 0) }
 	keyIndex := 0 // index in keys slice.
 	key := keys[keyIndex] // first key.
+	i := 0 // index inside the json.
 
 	Structure:
 	for {
@@ -353,135 +363,135 @@ func Get (json []byte, keys []string) (string, DataType, error) {
 
 		/* Between 'space', 'tab', 'return' and 'new line' chars, the 'space' char has the biggest byte number and they 
 		are all bellow any other important char. */
-		for json[i] <= ' '{ i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
+		for json[i] <= ' '{ i++ } // skipping spaces, tabs, returns and new lines.
 
-		// C:
 		switch json[i] { // matching char with a type of value.
 		case '{': // objects.
 			// fmt.Printf("'{'\n") // debug
 			i++
-			for json[i] <= ' '{ i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tab, returns and new lines.
+			for json[i] <= ' '{ i++ } // skipping spaces, tab, returns and new lines.
 			if json[i] == '}' { return "", 0, fmt.Errorf(`JSON path %v could not be found.`, keys[:keyIndex+1]) }
 
 			// reading keys.
 			for {
 				// fmt.Printf("-- [keyIndex: %d] reading key.\n", keyIndex) // debug
-				for json[i] != '"' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping every char that isn't a double quote.
-				i++
-				stringStart := i
+				for json[i] != '"' { i++ } // skipping every char that isn't a double quote.
+				keyStart := i
+				// fmt.Printf("key start at '%v'.\n", keyStart) // debug.
 				// finding end of this key.
-				for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+				hasEscape := false;
+				Str0:for{i++;for json[i]!='"' {i++;if json[i] == '\\'{hasEscape=true}};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str0};j--}}
 				// fmt.Printf("trying to match with key '%s'.\n", key) // debug.
+				// fmt.Printf("key end at '%v'.\n", i) // debug.
 				// trying to match this key with current given key.
-				keyRead := json[stringStart:i]
-				for json[i] != ':' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // searching key-value separator.
+				s := json[keyStart+1:i]
+				if (hasEscape) { s = jsonUnescape(s) }
+				// fmt.Printf("found key '%s'.\n", s) // debug.
+				keyRead := btos(s)
+
+				for json[i] != ':' { i++ } // searching key-value separator.
 				i++
 
-				if len(key) == len(keyRead) && key == btos(keyRead) {
+				if len(key) == len(keyRead) && key == keyRead {
 					// fmt.Printf("keyIndex: %d, keys %v, key: %s.\n", keyIndex, keys, key) // debug.
 					keyIndex++
 					if amountOfKeys > keyIndex { // if there are more keys to traverse.
 						key = keys[keyIndex]
 						continue Structure
 					} else { // final value.
-						for json[i] <= ' ' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-						c := json[i]
-						switch {
-						case c == '"':
+						for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+						switch json[i] {
+						case '"':
+							valueStart := i
+							hasEscape := false;
+							Str1:for{i++;for json[i]!='"' {i++;if json[i] == '\\'{hasEscape=true}};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str1};j--}}
+							s := json[valueStart+1:i]
+							if (hasEscape) { s = jsonUnescape(s) }
+							return btos(s), JsonString, nil
+						case '{':
+							valueStart := i
 							i++
-							valueStart := i
-							for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
-							s := json[valueStart:i]
-							return btos(bytes.ReplaceAll(s, []byte{'\\','\\'}, []byte{'\\'})), JsonString, nil
-						case c == '{':
-							valueStart := i
-							nest := 0
-							for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+							for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 								switch json[i] {
-								case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+								case '"': Str2:for{for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str2};j--};i++}
 								case '{': nest++
 								case '}': nest--
 								}
 							}
-							s := json[valueStart:i]
-							return btos(s), JsonObject, nil
-						case c == '[':
+							return btos(json[valueStart:i]), JsonObject, nil
+						case '[':
 							valueStart := i
-							nest := 0
-							for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+							i++
+							for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 								switch json[i] {
-								case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+								case '"': Str3:for{for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str3};j--};i++}
 								case '[': nest++
 								case ']': nest--
 								}
 							}
-							s := json[valueStart:i]
-							return btos(s), JsonArray, nil
-						case c >= '0' && c <= '9' || c == '-':
+							return btos(json[valueStart:i]), JsonArray, nil
+						case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
 							valueStart := i
 							i++
-							for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}
-							if json[i]=='.'{i++;for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}}
-							s := json[valueStart:i]
-							return btos(s), JsonNumber, nil
-						case c == 't':
-							s := json[i:i+4]
-							return btos(s), JsonBoolean, nil
-						case c == 'f':
-							s := json[i:i+5]
-							return btos(s), JsonBoolean, nil
-						case c == 'n':
-							s := json[i:i+4]
-							return btos(s), JsonNull, nil
-						default: return "", 0, &JSONBadSyntaxError{c: c, i: i}
+							for json[i] >= '0' && json[i] <= '9' { i++ }
+							if json[i]=='.' {
+								i++;
+								for json[i] >= '0' && json[i] <='9' { i++ }
+							}
+							return btos(json[valueStart:i]), JsonNumber, nil
+						case 't': return btos(json[i:i+4]), JsonBoolean, nil
+						case 'f': return btos(json[i:i+5]), JsonBoolean, nil
+						case 'n': return btos(json[i:i+4]), JsonNull, nil
+						default: return "", 0, &JsonBadSyntaxError{c: json[i], i: i}
 						}
 					}
 				}
 				// wrong key, ignoring value.
-				// fmt.Printf("key found '%s' not correct.\n", json[stringStart:i]) // debug
+				// fmt.Printf("key found '%s' not correct.\n", json[keyStart:i]) // debug
 
-				for json[i] <= ' ' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-				c := json[i]
-				switch {
-				case c == '"':
+				for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+				switch json[i] {
+				case '"':
+					Str4:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str4};j--}}
 					i++
-					for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+				case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
 					i++
-				case c == '{':
-					nest := 0
-					for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+					for json[i] >= '0' && json[i] <= '9' { i++ }
+					if json[i]=='.' {
+						i++;
+						for json[i] >= '0' && json[i] <='9' { i++ }
+					}
+				case '{':
+					i++
+					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 						switch json[i] {
-						case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+						case '"': Str5:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str5};j--}}
 						case '{': nest++
 						case '}': nest--
 						}
 					}
-				case c == '[':
-					nest := 0
-					for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+				case '[':
+					i++
+					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 						switch json[i] {
-						case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+						case '"': Str6:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str6};j--}}
 						case '[': nest++
 						case ']': nest--
 						}
 					}
-				case c >= '0' && c <= '9' || c == '-':
-					i++
-					for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}
-					if json[i]=='.'{i++;for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}}
-				case c == 't': i+=4
-				case c == 'f': i+=5
-				case c == 'n': i+=4
-				default: return "", 0, &JSONBadSyntaxError{c: c, i: i}
+				case 't': i += 4
+				case 'f': i += 5
+				case 'n': i += 4
+				default: return "", 0, &JsonBadSyntaxError{c: json[i], i: i}
 				}
-				for json[i] <= ' ' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-				// comma will be skipped, eventually, because of the 'i++' and 'for json[i] <= ' ' { i++ }' later on.
+				for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+
 				if json[i] == '}' {
 					// fmt.Printf("-- pos: %d, sample: '%s', char: %c\n", i, string(json[i-10:i+10]), json[i])
-					return "", 0, fmt.Errorf(`JSON key "%s" not found in %v.`, key, keys[:keyIndex+1])
+					return "", JsonObject, fmt.Errorf(`JSON key "%s" not found in structure %v.`, key, keys[:keyIndex])
 				}
 				if json[i] != ',' {
-					return "", 0, fmt.Errorf(`Unrecognized character '%c' at position %d. Expected comma ',' or closing curly braces '}'.`, json[i], i)
+					return "", JsonObject, fmt.Errorf(`Unrecognized character '%c' at position %d. Expected comma ',' or closing curly braces '}'.`, json[i], i)
 				}
 				i++
 			}
@@ -489,11 +499,9 @@ func Get (json []byte, keys []string) (string, DataType, error) {
 		case '[': // arrays.
 			// fmt.Printf("'['\n") // debug.
 			i++
-			if json[i] == ' ' {
-				i++
-				for json[i] <= ' ' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-			}
+			for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
 			if json[i] == ']' { return "", 0, fmt.Errorf(`JSON path %v could not be found.`, keys[:keyIndex+1]) }
+
 			keyNumeric, err := strconv.Atoi(key)
 			if err != nil { return "", 0, fmt.Errorf("Could not convert '%s' to number in given keys %v.", key, keys[:keyIndex+1]) } 
 			// else {
@@ -510,113 +518,240 @@ func Get (json []byte, keys []string) (string, DataType, error) {
 						case '{', '[': 
 							key = keys[keyIndex]
 							continue Structure
-						default: return "", 0, fmt.Errorf("JSON %v is not an structure. Can't traverse further.", keys[:keyIndex+1])
+						default: return "", 0, fmt.Errorf("JSON value at path %v is not an structure. Can't traverse further to find path %v.", keys[:keyIndex], keys)
 						}
 					} else { // final value.
-						c := json[i]
-						switch {
-						case c == '"':
+						switch json[i] {
+						case '"':
+							valueStart := i
+							hasEscape := false;
+							Str7:for{i++;for json[i]!='"' {i++;if json[i] == '\\'{hasEscape=true}};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str7};j--}}
+							s := json[valueStart+1:i]
+							if (hasEscape) { s = jsonUnescape(s) }
+							return btos(s), JsonString, nil
+						case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
 							valueStart := i
 							i++
-							for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
-							s := json[valueStart:i]
-							return btos(bytes.ReplaceAll(s, []byte{'\\','\\'}, []byte{'\\'})), JsonString, nil
-						case c >= '0' && c <= '9' || c == '-':
+							for json[i] >= '0' && json[i] <= '9' { i++ }
+							if json[i]=='.' {
+								i++;
+								for json[i] >= '0' && json[i] <='9' { i++ }
+							}
+							return btos(json[valueStart:i]), JsonNumber, nil
+						case '{':
 							valueStart := i
 							i++
-							for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}
-							if json[i]=='.'{i++;for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}}
-							s := json[valueStart:i]
-							return btos(s), JsonNumber, nil
-						case c == '{':
-							valueStart := i
-							nest := 0
-							for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+							for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 								switch json[i] {
-								case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+								case '"': Str8:for{for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str8};j--};i++}
 								case '{': nest++
 								case '}': nest--
 								}
 							}
-							s := json[valueStart:i]
-							return btos(s), JsonObject, nil
-						case c == '[':
+							return btos(json[valueStart:i]), JsonObject, nil
+						case '[':
 							valueStart := i
-							nest := 0
-							for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+							i++
+							for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 								switch json[i] {
-								case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+								case '"': Str9:for{for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str9};j--};i++}
 								case '[': nest++
 								case ']': nest--
 								}
 							}
-							s := json[valueStart:i]
-							return btos(s), JsonArray, nil
-						case c == 't':
-							s := json[i:i+4]
-							return btos(s), JsonBoolean, nil
-						case c == 'f':
-							s := json[i:i+5]
-							return btos(s), JsonBoolean, nil
-						case c == 'n':
-							s := json[i:i+4]
-							return btos(s), JsonNull, nil
-						default: return "", 0, &JSONBadSyntaxError{c: c, i: i}
+							return btos(json[valueStart:i]), JsonArray, nil
+						case 't': return btos(json[i:i+4]), JsonBoolean, nil
+						case 'f': return btos(json[i:i+5]), JsonBoolean, nil
+						case 'n': return btos(json[i:i+4]), JsonNull, nil
+						default: return "", 0, &JsonBadSyntaxError{c: json[i], i: i}
 						}
 					}
 				}
 				// ignoring value.
-				c := json[i]
-				switch {
-				case c == '"':
+				switch json[i] {
+				case '"':
+					Str10:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str10};j--}}
 					i++
-					for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+				case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
 					i++
-				case c >= '0' && c <= '9' || c == '-':
+					for json[i] >= '0' && json[i] <= '9' { i++ }
+					if json[i]=='.' {
+						i++;
+						for json[i] >= '0' && json[i] <='9' { i++ }
+					}
+				case '{':
 					i++
-					for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}
-					if json[i]=='.'{i++;for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}}
-				case c == '{':
-					nest := 0
-					for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 						switch json[i] {
-						case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+						case '"': Str11:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str11};j--}}
 						case '{': nest++
 						case '}': nest--
 						}
 					}
-				case c == '[':
-					nest := 0
-					for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+				case '[':
+					i++
+					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 						switch json[i] {
-						case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+						case '"': Str12:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str12};j--}}
 						case '[': nest++
 						case ']': nest--
 						}
 					}
-				case c == 't': i+=4
-				case c == 'f': i+=5
-				case c == 'n': i+=4
-				default: return "", 0, &JSONBadSyntaxError{c: c, i: i}
+				case 't': i+=4
+				case 'f': i+=5
+				case 'n': i+=4
+				default: return "", 0, &JsonBadSyntaxError{c: json[i], i: i}
 				}
 				// fmt.Printf("-- >> sample '%s', char: '%c'\n", string(json[i-10:i+10]), json[i]) // debug.
-				if json[i] == ' ' {
-					i++
-					for json[i] <= ' ' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-				}
+				for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
 				if json[i] == ',' {
 					i++ // skips comma.
-					for json[i] <= ' ' { i++; if i>=length{return "",0,&JSONEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
+					for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
 					arrayIndex++
 				} else if json[i] == ']' {
 					// fmt.Printf("-- pos: %d, sample: '%s', char: %c\n", i, string(json[i-10:i+10]), json[i])
-					return "", 0, fmt.Errorf(`Index "%d" not found at structure %v.`, keyNumeric, keys[:keyIndex+1])
+					return "", JsonArray, fmt.Errorf(`Index "%d" not found in structure %v.`, keyNumeric, keys[:keyIndex])
 				} else {
 					// fmt.Printf("-- __ sample '%s', char: %c\n", string(json[i-10:i+10]), json[i]) // debug.
-					return "", 0, fmt.Errorf(`Unrecognized character '%c' at position %d. Expected comma ',' or closing brackets '].`, json[i], i)
+					return "", JsonArray, fmt.Errorf(`Unrecognized character '%c' at position %d. Expected comma ',' or closing brackets '].`, json[i], i)
 				}
 			}
-		default: return "", 0, fmt.Errorf("JSON %v is not an structure. Can't traverse further.", keys[:keyIndex+1])
+		default: return "", 0, fmt.Errorf("JSON value at path %v is not an structure. Can't traverse further to find path %v.", keys[:keyIndex], keys)
+		}
+	}
+
+	return "", 0, fmt.Errorf(`this part should not be reached when getting a field from a json.`)
+}
+
+func Get (json []byte, keys []string) (s string, d DataType, e error) {
+	defer func() {
+		if err := recover(); err != nil {
+			e = fmt.Errorf(`Panic reading Json: %s`, err)
+		}
+	}()
+	return getPanic(json, keys)
+}
+
+// Same function but uses function calls instead of inlining. Varies between 20% and 4% worse than its equivalent.
+func getPanic2 (json []byte, keys []string) (string, DataType, error) {
+	// length := len(json)
+	amountOfKeys := len(keys)
+	if amountOfKeys == 0 { return getValue(json, 0) }
+	keyIndex := 0 // index in keys slice.
+	key := keys[keyIndex] // first key.
+	i := 0 // index inside the json.
+
+	Structure:
+	for {
+		// fmt.Printf("[%d] c='%c'. value=%v, keyIndex=%d, len(stack)=%d, path=%d\n", i, json[i], value, keyIndex, len(stack), path) // debug.
+		// fmt.Printf("-- [keyIndex: %d] reading value.\n", keyIndex) // debug.
+
+		/* Between 'space', 'tab', 'return' and 'new line' chars, the 'space' char has the biggest byte number and they 
+		are all bellow any other important char. */
+		for json[i] <= ' '{ i++ } // skipping spaces, tabs, returns and new lines.
+
+		switch json[i] { // matching char with a type of value.
+		case '{': // objects.
+			// fmt.Printf("'{'\n") // debug
+			i++
+			for json[i] <= ' '{ i++ } // skipping spaces, tab, returns and new lines.
+			if json[i] == '}' { return "", 0, fmt.Errorf(`JSON path %v could not be found.`, keys[:keyIndex+1]) }
+
+			// reading keys.
+			for {
+				// fmt.Printf("-- [keyIndex: %d] reading key.\n", keyIndex) // debug
+				for json[i] != '"' { i++ } // skipping every char that isn't a double quote.
+				keyStart := i
+				// fmt.Printf("key start at '%v'.\n", keyStart) // debug.
+				// finding end of this key.
+				hasEscape := false;
+				Str0:for{i++;for json[i]!='"' {i++;if json[i] == '\\'{hasEscape=true}};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str0};j--}}
+				/// fmt.Printf("trying to match with key '%s'.\n", key) // debug.
+				// fmt.Printf("key end at '%v'.\n", i) // debug.
+				// trying to match this key with current given key.
+				s := json[keyStart+1:i]
+				if (hasEscape) { s = jsonUnescape(s) }
+				// fmt.Printf("found key '%s'.\n", s) // debug.
+				keyRead := btos(s)
+
+				for json[i] != ':' { i++ } // searching key-value separator.
+				i++
+
+				if len(key) == len(keyRead) && key == keyRead {
+					// fmt.Printf("keyIndex: %d, keys %v, key: %s.\n", keyIndex, keys, key) // debug.
+					keyIndex++
+					if amountOfKeys > keyIndex { // if there are more keys to traverse.
+						key = keys[keyIndex]
+						continue Structure
+					} else { // final value.
+						return getValue(json, i)
+					}
+				}
+
+				// wrong key, ignoring value.
+				// fmt.Printf("key found '%s' not correct.\n", json[keyStart:i]) // debug
+				for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+				if err := skipValue(json, &i); err != nil { return "", JsonObject, err }
+
+				for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+
+				if json[i] == '}' {
+					// fmt.Printf("-- pos: %d, sample: '%s', char: %c\n", i, string(json[i-10:i+10]), json[i])
+					return "", JsonObject, fmt.Errorf(`JSON key "%s" not found in structure %v.`, key, keys[:keyIndex])
+				}
+				if json[i] != ',' {
+					return "", JsonObject, fmt.Errorf(`Unrecognized character '%c' at position %d. Expected comma ',' or closing curly braces '}'.`, json[i], i)
+				}
+				i++
+			}
+			continue
+		case '[': // arrays.
+			// fmt.Printf("'['\n") // debug.
+			i++
+			for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+			if json[i] == ']' { return "", 0, fmt.Errorf(`JSON path %v could not be found.`, keys[:keyIndex+1]) }
+
+			keyNumeric, err := strconv.Atoi(key)
+			if err != nil { return "", 0, fmt.Errorf("Could not convert '%s' to number in given keys %v.", key, keys[:keyIndex+1]) } 
+			// else {
+			// 	fmt.Printf("-- converted %s to number\n", key)
+			// }
+			arrayIndex := 0
+			for { // looping over 'arrayIndex'.
+				// c := json[i]
+				// fmt.Printf("-- !! char: '%c'\n", json[i]) // debug
+				if arrayIndex == keyNumeric { // we are at the array index we want.
+					keyIndex++
+					if amountOfKeys > keyIndex { // there are more keys.
+						switch json[i] {
+						case '{', '[': 
+							key = keys[keyIndex]
+							continue Structure
+						default: return "", 0, fmt.Errorf("JSON value at path %v is not an structure. Can't traverse further to find path %v.", keys[:keyIndex], keys)
+						}
+					} else { // final value.
+						return getValue(json, i)
+					}
+				}
+
+				// ignoring value.
+				if err := skipValue(json, &i); err != nil { return "", JsonArray, err }
+
+				// fmt.Printf("-- >> sample '%s', char: '%c'\n", string(json[i-10:i+10]), json[i]) // debug.
+				for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+				if json[i] == ',' {
+					i++ // skips comma.
+					for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+					arrayIndex++
+				} else if json[i] == ']' {
+					// fmt.Printf("-- pos: %d, sample: '%s', char: %c\n", i, string(json[i-10:i+10]), json[i])
+					return "", JsonArray, fmt.Errorf(`Index "%d" not found in structure %v.`, keyNumeric, keys[:keyIndex])
+				} else {
+					// fmt.Printf("-- __ sample '%s', char: %c\n", string(json[i-10:i+10]), json[i]) // debug.
+					return "", JsonArray, fmt.Errorf(`Unrecognized character '%c' at position %d. Expected comma ',' or closing brackets '].`, json[i], i)
+				}
+			}
+		default: return "", 0, fmt.Errorf("JSON value at path %v is not an structure. Can't traverse further to find path %v.", keys[:keyIndex], keys)
 		}
 	}
 
@@ -624,60 +759,95 @@ func Get (json []byte, keys []string) (string, DataType, error) {
 }
 
 func getValue (json []byte, i int) (string, DataType, error) {
-	length := len(json)
-	c := json[i]
-	switch {
-	case c == '"':
+	// length := len(json)
+	for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+	switch json[i] {
+	case '"':
+		valueStart := i
+		hasEscape := false;
+		Str0:for{i++;for json[i]!='"' {i++;if json[i] == '\\'{hasEscape=true}};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str0};j--}}
+		s := json[valueStart+1:i]
+		if (hasEscape) { s = jsonUnescape(s) }
+		return btos(s), JsonString, nil
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
 		valueStart := i
 		i++
-		for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
-		s := json[valueStart:i]
-		return btos(bytes.ReplaceAll(s, []byte{'\\','\\'}, []byte{'\\'})), JsonString, nil
-	case c == '{':
+		for json[i] >= '0' && json[i] <= '9' { i++ }
+		if json[i]=='.' {
+			i++;
+			for json[i] >= '0' && json[i] <='9' { i++ }
+		}
+		return btos(json[valueStart:i]), JsonNumber, nil
+	case '{':
 		valueStart := i
-		nest := 0
-		for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+		i++
+		for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 			switch json[i] {
-			case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+			case '"': Str1:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str1};j--}}
 			case '{': nest++
 			case '}': nest--
 			}
 		}
-		s := json[valueStart:i]
-		return btos(s), JsonObject, nil
-	case c == '[':
+		return btos(json[valueStart:i]), JsonObject, nil
+	case '[':
 		valueStart := i
-		nest := 0
-		for i++; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+		i++
+		for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
 			switch json[i] {
-			case '"': for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]=='"'{if json[i-1]!='\\'{break};slashesCount := 1;for j:=i-2;json[j]=='\\';j--{slashesCount++};if slashesCount%2==0{break}};i++}
+			case '"': Str2:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str2};j--}}
 			case '[': nest++
 			case ']': nest--
 			}
 		}
-		s := json[valueStart:i]
-		return btos(s), JsonArray, nil
-	case c >= '0' && c <= '9' || c == '-':
-		valueStart := i
-		i++
-		for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}
-		if json[i]=='.'{i++;for{if i>=length{return "",0,&JSONEndsAbruptlyError{}};if json[i]>='0'&&json[i]<='9'{i++}else{break}}}
-		s := json[valueStart:i]
-		return btos(s), JsonNumber, nil
-	case c == 't':
-		s := json[i:i+4]
-		return btos(s), JsonBoolean, nil
-	case c == 'f':
-		s := json[i:i+5]
-		return btos(s), JsonBoolean, nil
-	case c == 'n':
-		s := json[i:i+4]
-		return btos(s), JsonNull, nil
-	default: return "", 0, &JSONBadSyntaxError{c: c, i: i}
+		return btos(json[valueStart:i]), JsonArray, nil
+	case 't': return btos(json[i:i+4]), JsonBoolean, nil
+	case 'f': return btos(json[i:i+5]), JsonBoolean, nil
+	case 'n': return btos(json[i:i+4]), JsonNull, nil
+	default: return "", 0, &JsonBadSyntaxError{c: json[i], i: i}
 	}
 }
-
-// func main () {
-// 	s, d, e := Get([]byte(`{"aaa\\": "abc\\"}`), []string{"aaa"})
-// 	fmt.Println(s,d,e)
-// }
+func skipValue (json []byte, i *int) error {
+	switch json[*i] {
+	case '"':
+		Str10:for{*i++;for json[*i]!='"' {*i++};if json[*i-1]!='\\'{break};j := *i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str10};j--}}
+		*i++
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
+		*i++
+		for json[*i] >= '0' && json[*i] <= '9' { *i++ }
+		if json[*i]=='.' {
+			*i++;
+			for json[*i] >= '0' && json[*i] <='9' { *i++ }
+		}
+	case '{':
+		*i++
+		for nest := 0; nest > -1; *i++ { // will consider only curly braces out of strings (both keys and values).
+			switch json[*i] {
+			case '"': Str11:for{*i++;for json[*i]!='"' {*i++};if json[*i-1]!='\\'{break};j := *i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str11};j--}}
+			case '{': nest++
+			case '}': nest--
+			}
+		}
+	case '[':
+		*i++
+		for nest := 0; nest > -1; *i++ { // will consider only curly braces out of strings (both keys and values).
+			switch json[*i] {
+			case '"': Str12:for{*i++;for json[*i]!='"' {*i++};if json[*i-1]!='\\'{break};j := *i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str12};j--}}
+			case '[': nest++
+			case ']': nest--
+			}
+		}
+	case 't': *i+=4
+	case 'f': *i+=5
+	case 'n': *i+=4
+	default: return &JsonBadSyntaxError{c: json[*i], i: *i}
+	}
+	return nil
+}
+func Get2 (json []byte, keys []string) (s string, d DataType, e error) {
+	defer func() {
+		if err := recover(); err != nil {
+			e = fmt.Errorf(`Panic reading Json: %s`, err)
+		}
+	}()
+	return getPanic2(json, keys)
+}
