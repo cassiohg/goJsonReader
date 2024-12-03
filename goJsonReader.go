@@ -1,12 +1,11 @@
 package goJsonReader
+// package main
 
 import (
 	"fmt"
 	"strconv"
 	"unsafe"
 	"reflect"
-	"bytes"
-	"github.com/tidwall/gjson"
 )
 
 
@@ -27,8 +26,7 @@ func (d DataType) String() string {
 	case JsonNumber: return "Number"
 	case JsonBoolean: return "Boolean"
 	case JsonNull: return "Null"
-	default:
-		return fmt.Sprintf("Type[%v]",int8(d))
+	default: return fmt.Sprintf("Type[%v]",int8(d))
 	}
 }
 
@@ -60,294 +58,169 @@ func jsonUnescape(json []byte) []byte {
 	return unescapedString;
 }
 
-// Receives a string to be read as json as 1st argument followed by one or more strings that compose one path to a value 
-// inside the json structure. Returns the value as string, the value data type as int and may return a non nil error. There 
-// may be short cuts implemented which impose constraints on how the json can be formed. The trade off is parsing speed.
-func ForEach (json []byte, keys []string, each func(string, string, DataType, error) bool) error {
-	if len(keys) == 0 { return nil }
-	length := len(json)
+/* Arguments:
+	1) byte array to be read as json.
+	2) a callback function that will be executed at every element belonging to the top level structure found in the json.
 
-	keyIndex := 0 // index in keys slice.
-	key := keys[keyIndex] // first key.
+	That callback function arguments:
+	1) the numeric index representing the order when an element is found in the structure.
+	2) the string key of that element, only in case the structure is an object, otherwise it's an empty string.
+	3) the string containing the value of the element.
+	4) the data type of that element.
+	callback return:
+	1) when false is returned, the callback will not be called again. This is the interrupt/break for the ForEach. When true
+	is returned, the next element will be read and passed to the next call of this callback.
 
-	// err := fmt.Errorf("JSON is not a object, cannot hold key \"%s\".", key)
-	path := 1 // state of path search. 
-	// 0 means last parsed key is not in the path we are searching.
-	// 1 means we are in the given path.
-	// 2 means we are at the last key given.
-	value := true // searching for a value.
-	stack := make([]byte, 0, len(keys)) // stack of structures when traversing in Breadth First Search.
-	// byte for '{' means we entered an object.
-	// byte for '[' means we entered an array.
-	indexes := make([]int, 0, 2) // stack of indexes for each array we enter.
-	var keyNumeric int // int to store current key value when it is an array index instead of a string.
-	var bufferEach bool // when set to true, each key value pair will be saved before executing the given function.
-	var lastKey string // last found key to be passed in argument to given function.
-
-	i := 0 // index inside the string. pointing to runes.
-	for i < len(json) {
-		// fmt.Printf("[%d] c='%c'. value=%v, keyIndex=%d, len(stack)=%d, path=%d\n", i, json[i], value, keyIndex, len(stack), path) // debug.
-
-		if value { // reading value
-			// fmt.Printf("-- [keyIndex: %d] reading value.\n", keyIndex) // debug.
-
-			/* Between 'space', 'tab', 'return' and 'new line' chars, the 'space' char has the biggest byte number and they 
-			are all bellow any other important char. */
-			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-
-			switch json[i] { // matching char with a type of value.
-			case '{': // objects.
-				// fmt.Printf("'{'\n") // debug
-				i++
-				if i>=length{return &JsonEndsAbruptlyError{}}
-				for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tab, returns and new lines.
-				if path == 1 {
-					if json[i] != '}' {
-						stack = append(stack, '{') // when an object, we have another structure to traverse.
-						value = false
-						continue
-					}
-				} else if path == 2 {
-					// fmt.Printf("path: %d\n", path) // debug
-					if bufferEach == false {
-						bufferEach = true
-						if json[i] != '}' {
-							value = false
-							continue
-						}
-					} else {
-						if json[i] != '}' {
-							valueStart := i
-							for nest := 0 ; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
-								switch json[i] {
-								case '"': Str0:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str0};j--}}
-								case '{': nest++
-								case '}': nest--
-								}
-							}
-							// fmt.Printf(">>> executing FUNCTION\n") // debug
-							if !each(lastKey, btos(json[valueStart:i]), JsonObject, nil) { return nil }
-							value = false
-							continue
-						} else {
-							return nil
-						}
-					}
-				} else if path == 0 {
-					// valueStart := i // debug.
-					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
-						switch json[i] {
-						case '"': Str1:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str1};j--}}
-						case '{': nest++
-						case '}': nest--
-						}
-					}
-					// fmt.Printf("skipped whole object: %v\n", json[valueStart:i]) // debug.
-				}
-			case '[': // arrays.
-				// fmt.Printf("'['\n") // debug.
-				i++
-				if i>=length{return &JsonEndsAbruptlyError{}}
-				for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tab, returns and new lines.
-				if path == 1 {
-					if json[i] != ']' {
-						// inside an array there are more values, so we have to keep 'value = true'.
-						stack = append(stack, '[')
-						indexes = append(indexes, 0) // index 0 for first value of the array.
-						var err error
-						keyNumeric, err = strconv.Atoi(key)
-						if err != nil {
-							return fmt.Errorf("Could not convert '%s' to number in given keys %v", key, keys[:keyIndex+1])
-						}
-						if keyNumeric == 0 { path = 2 } else { path = 0 }
-						continue
-					}
-				} else if path == 2 {
-					bufferEach = true
-					if json[i] != ']' {
-						valueStart := i
-						for nest := 0; nest > -1; i++ { // will consider only brackets out of strings (both keys and values).
-							switch json[i] {
-							case '"': Str2:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str2};j--}}
-							case '[': nest++
-							case ']': nest--
-							}
-						}
-						if !each(lastKey, btos(json[valueStart:i]), JsonArray, nil) { return nil }
-					} else {
-						return nil
-					}
-				} else {
-					// valueStart := i // debug.
-					// fmt.Printf("valueStart=%d.\n", valueStart) // debug.
-					for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
-						switch json[i] {
-						case '"': Str3:for{i++;if i>=length{return &JsonEndsAbruptlyError{}};for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str3};j--}}
-						case '[': nest++
-						case ']': nest--
-						}
-					}
-					// fmt.Printf("skipped whole array: %v\n", json[valueStart:i]) // debug.
-				}
-			case '"': // strings.
-				// fmt.Printf("start of a string\n") // debug.
-				i++
-				if i>=length{return &JsonEndsAbruptlyError{}}
-				k := i
-				// searching end of string.
-				Str4:for{for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str4};j--};i++}
-				// fmt.Printf("start=%d, end=%d.\n", k, i) // debug.
-				if path == 1 {
-					return fmt.Errorf("JSON %v is not object can't traverse further.", keys[:keyIndex+1])
-				} else if path == 2{
-					each(lastKey, btos(bytes.ReplaceAll(json[k:i], []byte{'\\','\\'}, []byte{'\\'})), JsonString, nil)
-					return nil
-				}
-				i++
-			case 't': // true
-				// fmt.Printf("valueBool true.\n") // debug.
-				// fmt.Printf("start=%d, end=%d.\n", i, i+4) // debug.
-				if path == 1 {
-					return fmt.Errorf("JSON %v is not object can't traverse further.", keys[:keyIndex+1])
-				} else if path == 2 {
-					each(lastKey, btos(json[i:i+4]), JsonBoolean, nil)
-					return nil
-				}
-				i += 4
-			case 'f': // false.
-				// fmt.Printf("valueBool false.\n") // debug
-				// fmt.Printf("start=%d, end=%d.\n", i, i+5) // debug
-				if path == 1 {
-					return fmt.Errorf("JSON %v is not object can't traverse further.", keys[:keyIndex+1])
-				} else if path == 2 {
-					each(lastKey, btos(json[i:i+5]), JsonBoolean, nil)
-					return nil
-				}
-				i += 5
-			case 'n': // null.
-				// fmt.Printf("valueNull.\n") // debug
-				// fmt.Printf("start=%d, end=%d.\n", i, i+4) // debug
-				if path == 1 {
-					return fmt.Errorf("JSON %v is not object can't traverse further.", keys[:keyIndex+1])
-				} else if path == 2 {
-					each(lastKey, btos(json[i:i+4]), JsonNull, nil)
-					return nil
-				}
-				i += 4
-			case '-': fallthrough // negative numbers
-			default: // numbers.
-				// fmt.Printf("valueNumber.\n") // debug
-				k := i
-				i++
-				for c := json[i]; c >= '0' && c <= '9' || c == '.'; c = json[i] { i++ }
-				// fmt.Printf("start=%d, end=%d.\n", k, i) // debug
-				if path == 0 {
-					break
-				} else if path == 1 {
-					return fmt.Errorf("JSON %v is not object can't traverse further.", keys[:keyIndex+1])
-				} else if path == 2 {
-					each(lastKey, btos(json[k:i]), JsonNumber, nil)
-					return nil
-				}
-			}
-			// fmt.Printf("value skipped\n") // debug.
-			// fmt.Printf("-- finished reading value.\n") // debug
-			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-
-			switch json[i] {
-			// if we are in a object, we'll parse a key. if we are in an array, we'll parse a value.
-			case ',':
-				value = stack[len(stack)-1] == '['
-				if value {
-					indexes[len(indexes)-1]++ // last value has passed, we increment the array index.
-					if keyNumeric == indexes[len(indexes)-1] { // if given key (converted to int) matched the array index.
-						if len(keys) > keyIndex+1 { // if this is not the last key.
-							keyIndex++
-							key = keys[keyIndex]
-							path = 1
-							// fmt.Printf("next key is \"%s\".\n", key) // debug.
-						} else { // if this is the last key.
-							path = 2
-							// fmt.Println("This key is the last one and belongs to an Array Index. Returning next value.") // debug.
-						}
-					}
-				}
-			case '}', ']':
-				if json[i] == ']' { indexes = indexes[:len(indexes)-1] }
-				stack = stack[:len(stack)-1]
-				if len(stack) < keyIndex+1 {
-					// fmt.Printf("stack length: %v, keyIndex: %v, key: %v\n", len(stack), keyIndex, key) // debug
-					// return fmt.Errorf(`JSON path %v could not be found.`, keys[:keyIndex+1])
-					return nil
-				}
-			}
-			i++
-			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
-		} else { // reading key
-			// fmt.Printf("-- [keyIndex: %d] reading key.\n", keyIndex) // debug
-			value = true
-			for json[i] != '"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping every char that isn't a double quote.
-			i++
-			if i>=length{return &JsonEndsAbruptlyError{}}
-
-			if bufferEach == false {
-			// if stack level matches query string index and we are still traversing the structure.
-			// fmt.Printf("stack length: %d, keyIndex: %d, path: %d.\n", len(stack), keyIndex, path) // debug.
-			// if len(stack) == keyIndex+1 && path < 2 { // keyIndex+1 because stack is 1 at root level, and 0 when json is just a value.
-				// fmt.Printf("trying to match with key '%s'.\n", key) // debug.
-				// trying to match this key with current given key.
-				j := 0
-				keyMatch := true
-				for j < len(key) {
-					// fmt.Printf("checking key: a='%c' - b='%c'\n", json[i], key[j]) // debug.
-					if json[i] != key[j] {
-						keyMatch = false
-						break
-					}
-					i++
-					j++
-				}
-				if keyMatch && json[i] == '"' { // if keys have the same chars and json key doesn't have more chars.
-					// fmt.Printf("key found %s correct found at position %d.\n", json[i-j-1:i+1], i-j-1) // debug.
-					if len(keys) > keyIndex+1 {
-						keyIndex++
-						key = keys[keyIndex]
-						path = 1 // in the path to final key.
-						// fmt.Printf("next key is \"%s\".\n", key) // debug.
-					} else {
-						path = 2 // final key. we should never see 'value = false' again.
-						// fmt.Printf("This key is the last one. Returning next value.\n") // debug.
-					}
-				} else {
-					path = 0 // deviated from correct path.
-					// k := i // debug
-					// searching key end.
-					Str5:for{for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str5};j--};i++}
-					// fmt.Printf("key found %s not correct.\n", json[k-j-1:i+1]) // debug
-				}
-			} else {
-			// 	// k := i // debug
-			// 	for json[i] != '"' { i++ } // searching key end.
-			// 	// fmt.Printf("ignoring key '%s'.\n", json[k-1:i+1]) // debug
-			// 	for json[i] != ':' { i++ } // searching key-value separator.
-				k := i
-				Str6:for{for json[i]!='"' { i++; if i>=length{return &JsonEndsAbruptlyError{}} };if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str6};j--};i++}
-				lastKey = btos(json[k:i])
-				// fmt.Printf("lastKey '%s'.\n", lastKey) // debug
-			}
-			for json[i] != ':' { i++; if i>=length{return &JsonEndsAbruptlyError{}} }
-			i++
-			if i>=length{return &JsonEndsAbruptlyError{}}
-			for json[i] <= ' ' { i++; if i>=length{return &JsonEndsAbruptlyError{}} } // skipping spaces, tabs, returns and new lines.
+Return:
+	1) error found during json read. This function does not validate the json, but will not panic if the json isn't
+	correct. This is a trade off for speed. In case of a malformed json, the values read might be incorrect, or strange.
+*/
+func ForEach (json []byte, keys []string, each func(int, string, string, DataType) bool) (e error) {
+	defer func() {
+		if err := recover(); err != nil {
+			e = fmt.Errorf(`Panic reading Json: %s`, err)
 		}
+	}()
+
+	// If not path given, we get the value at that path before executing foreach.
+	if keys != nil && len(keys) > 0 && keys[0] != "" {
+		value, _, _ := getPanic(json, keys)
+		json = stob(value)
+	} else {
+		i := 0
+		for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+		json = json[i:]
+	}
+	return forEachPanic(json, each)
+}
+func forEachPanic (json []byte, each func(int, string, string, DataType) bool) error {
+	i := 0
+
+	var d DataType // The type of structure we are reading.
+	switch json[i] {
+	case '{': d = JsonObject
+	case '[': d = JsonArray
+	default: return fmt.Errorf("Cannot execute ForEach for value that isn't either an object or an array.")
 	}
 
-	return fmt.Errorf(`this part should not be reached when getting a field from a json`)
+	index := 0
+	keyRead := ""
+	Loop: for {
+		// Getting key if given json is an object. If it's an array 'keyRead' stays an empty string.
+		if d == JsonObject {
+			for json[i] != '"' { i++ } // skipping every char that isn't a double quote.
+			keyStart := i
+			// fmt.Printf("key start at '%v'.\n", keyStart) // debug.
+			// Finding end of this key.
+			hasEscape := false;
+			Str0:for{i++;for json[i]!='"' {i++;if json[i] == '\\'{hasEscape=true}};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str0};j--}}
+			// fmt.Printf("key end at '%v'.\n", i) // debug.
+			s := json[keyStart+1:i]
+			if (hasEscape) { s = jsonUnescape(s) }
+			// fmt.Printf("found key '%s'.\n", s) // debug.
+			keyRead = btos(s)
+
+			for json[i] != ':' { i++ } // searching key-value separator.
+		}
+		i++
+		for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+
+		// Getting value.
+		var value string
+		var dataType DataType
+		switch json[i] {
+		case '"':
+			dataType = JsonString
+			valueStart := i
+			hasEscape := false;
+			Str1:for{i++;for json[i]!='"' {i++;if json[i] == '\\'{hasEscape=true}};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str1};j--}}
+			s := json[valueStart+1:i]
+			if (hasEscape) { s = jsonUnescape(s) }
+			value = btos(s)
+			i++
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
+			dataType = JsonNumber
+			valueStart := i
+			i++
+			for json[i] >= '0' && json[i] <= '9' { i++ }
+			if json[i]=='.' {
+				i++;
+				for json[i] >= '0' && json[i] <='9' { i++ }
+			}
+			value = btos(json[valueStart:i])
+		case '{':
+			dataType = JsonObject
+			valueStart := i
+			i++
+			for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+				switch json[i] {
+				case '"': Str2:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str2};j--}}
+				case '{': nest++
+				case '}': nest--
+				}
+			}
+			value = btos(json[valueStart:i])
+		case '[':
+			dataType = JsonArray
+			valueStart := i
+			i++
+			for nest := 0; nest > -1; i++ { // will consider only curly braces out of strings (both keys and values).
+				switch json[i] {
+				case '"': Str3:for{i++;for json[i]!='"' {i++};if json[i-1]!='\\'{break};j := i-2;for {if json[j]!='\\'{break};j--;if json[j]!='\\'{break Str3};j--}}
+				case '[': nest++
+				case ']': nest--
+				}
+			}
+			value = btos(json[valueStart:i])
+		case 't':
+			dataType = JsonBoolean
+			valueStart := i
+			i += 4
+			value = btos(json[valueStart:i])
+		case 'f':
+			dataType = JsonBoolean
+			valueStart := i
+			i += 5
+			value = btos(json[valueStart:i])
+		case 'n':
+			dataType = JsonNull
+			valueStart := i
+			i += 4
+			value = btos(json[valueStart:i])
+		default: return &JsonBadSyntaxError{c: json[i], i: i}
+		}
+
+		if !each(index, keyRead, value, dataType) { return nil }
+		index++
+
+		for json[i] <= ' ' { i++ } // skipping spaces, tabs, returns and new lines.
+		switch json[i] { // Looking for comma or end of object/array.
+		case ',': continue
+		case '}', ']': break Loop
+		default: return &JsonBadSyntaxError{c: json[i], i: i}
+		}
+	}
+	return nil
 }
 
-// Receives a string to be read as json as 1st argument followed by one or more strings that compose a path to a value 
-// inside the json structure. Returns the value as string, the value data type as int and may return a non nil error. There 
-// may be short cuts implemented which impose constraints on how the json can be formed. The trade off is parsing speed.
+/* Arguments:
+	1) byte array to be read as json.
+	2) the path where the target value is located inside the given json
+
+Return:
+	1) the string containing the target value inside the given json.
+	2) the data type of that value.
+	3) the error found during json read. This function does not validate the json, but will not panic if the json isn't
+	correct. This is a trade off for speed. In case of a malformed json, the values read might be incorrect, or strange.
+*/
+func Get (json []byte, path []string) (s string, d DataType, e error) {
+	defer func() {
+		if err := recover(); err != nil {
+			e = fmt.Errorf(`Panic reading Json: %s`, err)
+		}
+	}()
+	return getPanic(json, path)
+}
 func getPanic (json []byte, keys []string) (string, DataType, error) {
 	// length := len(json)
 	amountOfKeys := len(keys)
@@ -623,15 +496,15 @@ func getPanic (json []byte, keys []string) (string, DataType, error) {
 	return "", 0, fmt.Errorf(`this part should not be reached when getting a field from a json.`)
 }
 
-func Get (json []byte, keys []string) (s string, d DataType, e error) {
+
+func Get2 (json []byte, keys []string) (s string, d DataType, e error) {
 	defer func() {
 		if err := recover(); err != nil {
 			e = fmt.Errorf(`Panic reading Json: %s`, err)
 		}
 	}()
-	return getPanic(json, keys)
+	return getPanic2(json, keys)
 }
-
 // Same function but uses function calls instead of inlining. Varies between 20% and 4% worse than its equivalent.
 func getPanic2 (json []byte, keys []string) (string, DataType, error) {
 	// length := len(json)
@@ -843,11 +716,4 @@ func skipValue (json []byte, i *int) error {
 	}
 	return nil
 }
-func Get2 (json []byte, keys []string) (s string, d DataType, e error) {
-	defer func() {
-		if err := recover(); err != nil {
-			e = fmt.Errorf(`Panic reading Json: %s`, err)
-		}
-	}()
-	return getPanic2(json, keys)
-}
+

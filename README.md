@@ -23,11 +23,8 @@ func main() {
 	}
 	fmt.Printf("value=%s, dataType=%v\n", str, d)
 
-	err := goJsonReader.ForEach(json, []string{"a"}, func (key, value string, d DataType, err error) bool {
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("key=%s, value=%s, dataType=%v\n", key, value, d)
+	err := goJsonReader.ForEach(json, []string{"a"}, func (index int, key, value string, d DataType) bool {
+		fmt.Printf("index=%d, key=%s, value=%s, dataType=%v\n", index, key, value, d)
 		return true;
 	})
 	if err != nil {
