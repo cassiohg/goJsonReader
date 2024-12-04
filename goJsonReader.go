@@ -1,5 +1,4 @@
 package goJsonReader
-// package main
 
 import (
 	"fmt"
